@@ -104,15 +104,20 @@ export function analyzeDataset({ headers, rows, headerWarnings = [] }, purpose =
     if (counts.length === 2 && Math.min(...counts) / Math.max(...counts) < 0.25) findings.push({ id: 'class-imbalance', severity: 'medium', category: 'Representativeness', title: `${outcomeColumn.name} is imbalanced`, evidence: `The smallest class has ${Math.min(...counts)} records versus ${Math.max(...counts)} in the largest class.`, impact: 'A model or summary can be dominated by the majority class.', action: 'Report class counts and choose evaluation metrics deliberately.' });
   }
 
+  headerWarnings.forEach((warning, index) => findings.push({ id: `header-${index}`, severity: 'medium', category: 'Structure', title: 'Duplicate column name normalized', evidence: warning, impact: 'Ambiguous headers can make analysis and exported reports difficult to interpret.', action: 'Rename columns in the source when possible.' }));
   const score = Math.max(0, 100 - findings.reduce((total, finding) => total + (finding.severity === 'high' ? 16 : 7), 0));
   const high = findings.filter(finding => finding.severity === 'high').length;
   const gate = high ? 'Needs review' : findings.length ? 'Ready to explore' : 'Ready to model';
-  headerWarnings.forEach((warning, index) => findings.push({ id: `header-${index}`, severity: 'medium', category: 'Structure', title: 'Duplicate column name normalized', evidence: warning, impact: 'Ambiguous headers can make analysis and exported reports difficult to interpret.', action: 'Rename columns in the source when possible.' }));
-  return { headers, rows, columns, findings, score, gate, purpose, duplicateGroups, stressTest: buildStressTest({ headers, rows }) };
+  return { headers, rows, columns, findings, score, scoreBasis: '100 minus 16 points per high-risk finding and 7 points per other finding, floored at 0.', gate, purpose, duplicateGroups, stressTest: buildStressTest({ headers, rows }) };
 }
 
 function mean(values) { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null; }
-function direction(delta) { return delta === null ? 'insufficient data' : delta > 0.0001 ? 'Group A higher' : delta < -0.0001 ? 'Group B higher' : 'approximately equal'; }
+function comparison(delta, groups) {
+  if (delta === null) return { higherGroup: null, comparisonLabel: 'Insufficient data' };
+  if (Math.abs(delta) <= 0.0001) return { higherGroup: null, comparisonLabel: 'Neither group higher' };
+  const higherGroup = delta > 0 ? groups[0] : groups[1];
+  return { higherGroup, comparisonLabel: `${higherGroup} higher` };
+}
 
 function scenarioMeans(rows, groupIndex, metricIndex, groups, mode) {
   let working = rows;
@@ -120,7 +125,7 @@ function scenarioMeans(rows, groupIndex, metricIndex, groups, mode) {
     const seen = new Set();
     working = rows.filter(row => { const key = row.join('\u001f'); if (seen.has(key)) return false; seen.add(key); return true; });
   }
-  const numbers = working.map(row => Number(row[metricIndex])).filter(Number.isFinite);
+  const numbers = working.filter(row => row[metricIndex] !== '').map(row => Number(row[metricIndex])).filter(Number.isFinite);
   const replacement = median(numbers);
   return groups.map(group => {
     const values = working.filter(row => row[groupIndex] === group).map(row => {
@@ -142,11 +147,14 @@ export function buildStressTest({ headers, rows }) {
     { id: 'dedupe', label: 'Remove exact duplicates', note: 'Removes identical rows before calculating group means.', mode: 'dedupe' },
     { id: 'impute', label: 'Median imputation', note: 'Fills blank metric values with the global observed median.', mode: 'impute' }
   ].map(scenario => {
-    const values = scenarioMeans(rows, groupIndex, metricIndex, groups, scenario.mode);
+    // Each scenario starts from its own immutable copy. In particular, the
+    // imputation median is computed from this scenario's working rows rather
+    // than reusing a median from the deduplicated scenario.
+    const values = scenarioMeans(rows.map(row => [...row]), groupIndex, metricIndex, groups, scenario.mode);
     const delta = values[0].mean !== null && values[1].mean !== null ? values[0].mean - values[1].mean : null;
-    return { ...scenario, values, delta, direction: direction(delta) };
+    return { ...scenario, values, delta, ...comparison(delta, groups), observedMedian: scenario.mode === 'impute' ? median(rows.filter(row => row[metricIndex] !== '').map(row => Number(row[metricIndex])).filter(Number.isFinite)) : null };
   });
-  const directions = scenarios.filter(scenario => scenario.delta !== null).map(scenario => scenario.direction);
+  const directions = scenarios.filter(scenario => scenario.higherGroup !== null).map(scenario => scenario.higherGroup);
   const conclusionSensitive = new Set(directions).size > 1;
   return { groupColumn: headers[groupIndex], metricColumn: headers[metricIndex], groups, scenarios, conclusionSensitive, question: `Does ${groups[0]} have a higher average ${headers[metricIndex]} than ${groups[1]}?` };
 }
@@ -171,12 +179,12 @@ export function buildAuditJson(result, metadata = {}) {
 }
 
 export function buildPassportReport(result) {
-  const lines = [`# DataTrust Passport`, '', `- **Readiness:** ${result.gate}`, `- **Readiness score:** ${result.score}/100`, `- **Rows:** ${result.rows.length}`, `- **Columns:** ${result.headers.length}`, '', '## Findings', ''];
+  const lines = [`# DataTrust Passport`, '', `- **Readiness:** ${result.gate}`, `- **Review status score:** ${result.score}/100`, `- **Score basis:** ${result.scoreBasis}`, `- **Rows:** ${result.rows.length}`, `- **Columns:** ${result.headers.length}`, '', '## Findings', ''];
   if (!result.findings.length) lines.push('No automated findings. Review domain-specific assumptions before publication.');
   result.findings.forEach(finding => lines.push(`### ${finding.severity.toUpperCase()} · ${finding.title}`, `- **Evidence:** ${finding.evidence}`, `- **Why it matters:** ${finding.impact}`, `- **Suggested action:** ${finding.action}`, ''));
   if (result.stressTest) {
     lines.push('## Conclusion stress test', '', `**Question:** ${result.stressTest.question}`, '', `**Stability:** ${result.stressTest.conclusionSensitive ? 'Conclusion-sensitive — the direction changes under at least one scenario.' : 'Direction stayed consistent across the tested scenarios.'}`, '');
-    result.stressTest.scenarios.forEach(scenario => lines.push(`### ${scenario.label}`, `- ${scenario.note}`, `- ${result.stressTest.groups[0]}: ${scenario.values[0].mean === null ? 'insufficient data' : scenario.values[0].mean.toFixed(1)}`, `- ${result.stressTest.groups[1]}: ${scenario.values[1].mean === null ? 'insufficient data' : scenario.values[1].mean.toFixed(1)}`, `- Direction: ${scenario.direction}`, ''));
+    result.stressTest.scenarios.forEach(scenario => lines.push(`### ${scenario.label}`, `- ${scenario.note}`, `- ${result.stressTest.groups[0]}: ${scenario.values[0].mean === null ? 'insufficient data' : scenario.values[0].mean.toFixed(4)} (n=${scenario.values[0].n})`, `- ${result.stressTest.groups[1]}: ${scenario.values[1].mean === null ? 'insufficient data' : scenario.values[1].mean.toFixed(4)} (n=${scenario.values[1].n})`, `- Observed median used: ${scenario.observedMedian === null ? 'not applicable' : scenario.observedMedian.toFixed(4)}`, `- Conclusion: ${scenario.comparisonLabel}`, ''));
   }
   lines.push('## Limitations', '', 'DataTrust identifies signals; it does not certify truth, causality, fairness or legal compliance. Review findings with a domain expert.');
   return lines.join('\n');
