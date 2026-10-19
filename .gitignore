@@ -1,0 +1,10 @@
+node_modules/
+.opencode/node_modules/
+.opencode/package-lock.json
+.env
+.env.*
+!.env.example
+*.log
+dist/
+coverage/
+.DS_Store

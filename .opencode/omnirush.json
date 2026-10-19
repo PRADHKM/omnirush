@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "workspace": {
+    "name": "omnirush.ai",
+    "createdAt": 1792397249866,
+    "preset": "starter"
+  },
+  "authorizedRoots": [
+    "C:\\Users\\maruthi Prasad\\omnirush.ai"
+  ],
+  "reload": null
+}
