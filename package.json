@@ -1,10 +1,14 @@
 {
   "name": "datatrust-passport",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "22.18.0"
+  },
   "scripts": {
     "test": "node --test",
-    "serve": "python -m http.server 4173"
+    "serve": "python -m http.server 4173",
+    "serve:node": "node server.mjs"
   }
 }
